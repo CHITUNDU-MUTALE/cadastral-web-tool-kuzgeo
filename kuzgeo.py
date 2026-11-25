@@ -10,11 +10,10 @@ from fpdf import FPDF
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="Zambian Cadastral Survey Computation Engine",
-    page_icon="📐",
     layout="wide"
 )
 
-st.title("📐 Zambian Cadastral Survey Computation Engine")
+st.title("Zambian Cadastral Survey Computation Engine")
 st.caption("GE500 Topic 1.4: Bearings, Distances, Bowditch Adjustment, Area & 2D Helmert Transformation")
 
 # --- MATHEMATICAL HELPER FUNCTIONS ---
@@ -163,12 +162,116 @@ def helmert_2d_transformation(src_p1, tgt_p1, src_p2, tgt_p2, points_to_transfor
     params = {'a': a, 'b': b, 'cE': cE, 'cN': cN, 'scale': scale, 'rotation_deg': rotation_deg}
     return params, transformed_points
 
+def _pdf_safe_text(val):
+    """Sanitizes strings for core Latin-1 PDF fonts."""
+    text = str(val)
+    replacements = {
+        "°": " deg ",
+        "Δ": "d",
+        "²": "^2",
+        "θ": "theta",
+        "–": "-",
+        "—": "-",
+        "“": '"',
+        "”": '"',
+        "’": "'",
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+def _format_cell(val):
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return _pdf_safe_text(val)
+        return f"{val:.3f}"
+    return _pdf_safe_text(val)
+
+def generate_full_pdf_report(sections):
+    """
+    Builds a multi-section PDF containing all provided summary lines and DataFrames.
+    sections: list of dicts with keys:
+      - 'title': str
+      - 'summary': list[str] (optional)
+      - 'tables': list[tuple[str, pd.DataFrame]]
+    """
+    class SurveyPDF(FPDF):
+        def header(self):
+            self.set_font("Helvetica", "B", 13)
+            self.cell(0, 8, "ZAMBIAN CADASTRAL SURVEY COMPUTATION REPORT", new_x="LMARGIN", new_y="NEXT", align="C")
+            self.set_font("Helvetica", "I", 9)
+            self.cell(0, 5, "GE500 Topic 1.4: Traverse, Shoelace Area & 2D Helmert Transformation", new_x="LMARGIN", new_y="NEXT", align="C")
+            self.line(10, 24, 287, 24)
+            self.ln(5)
+
+        def footer(self):
+            self.set_y(-12)
+            self.set_font("Helvetica", "I", 8)
+            self.cell(0, 8, f"Page {self.page_no()}", align="C")
+
+    pdf = SurveyPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    usable_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+    def write_dataframe_table(table_title, df):
+        if df is None or df.empty:
+            return
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 7, _pdf_safe_text(table_title), new_x="LMARGIN", new_y="NEXT")
+
+        cols = [str(c) for c in df.columns]
+        n_cols = max(len(cols), 1)
+        col_w = usable_w / n_cols
+
+        def draw_table_header():
+            pdf.set_font("Helvetica", "B", 7.5)
+            pdf.set_fill_color(230, 235, 242)
+            for c in cols:
+                pdf.cell(col_w, 6, _pdf_safe_text(c)[:26], border=1, fill=True)
+            pdf.ln()
+
+        draw_table_header()
+        pdf.set_font("Helvetica", "", 7.5)
+        for _, row in df.iterrows():
+            if pdf.get_y() + 6 > pdf.h - pdf.b_margin:
+                pdf.add_page()
+                draw_table_header()
+                pdf.set_font("Helvetica", "", 7.5)
+            for c in df.columns:
+                cell_txt = _format_cell(row[c])
+                pdf.cell(col_w, 5.5, cell_txt[:28], border=1)
+            pdf.ln()
+        pdf.ln(4)
+
+    for sec in sections:
+        if pdf.get_y() + 16 > pdf.h - pdf.b_margin:
+            pdf.add_page()
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 8, _pdf_safe_text(sec["title"]), new_x="LMARGIN", new_y="NEXT")
+
+        for line in sec.get("summary", []):
+            pdf.set_font("Helvetica", "", 9)
+            pdf.cell(0, 5.5, _pdf_safe_text(line), new_x="LMARGIN", new_y="NEXT")
+        if sec.get("summary"):
+            pdf.ln(2)
+
+        for t_title, t_df in sec.get("tables", []):
+            write_dataframe_table(t_title, t_df)
+
+        pdf.ln(3)
+
+    return bytes(pdf.output())
+
 # --- APP LAYOUT (TABS) ---
 tab1, tab2, tab3 = st.tabs([
-    "🔄 Traverse Computation & Bowditch",
-    "📐 Shoelace Area Engine",
-    "🔀 2D Helmert Transformation"
+    "Traverse Computation & Bowditch",
+    "Shoelace Area Engine",
+    "2D Helmert Transformation"
 ])
+
+report_sections = []
 
 # ==========================================
 # TAB 1: TRAVERSE COMPUTATION & BOWDITCH
@@ -186,6 +289,8 @@ with tab1:
     )
     
     st.markdown("---")
+    tab1_tables = []
+    tab1_summary = [f"Input Mode: {input_mode}"]
     
     if "Mode A" in input_mode:
         st.subheader("1. Enter Station Coordinates (Closed Loop)")
@@ -195,6 +300,7 @@ with tab1:
             "Northing (m)": [2000.000, 2000.000, 2300.000, 2300.000]
         })
         edited_df = st.data_editor(default_coords, num_rows="dynamic", use_container_width=True)
+        tab1_tables.append(("Input Station Coordinates (Mode A)", edited_df))
         
         if len(edited_df) >= 3:
             coords_list = list(zip(edited_df["Easting (m)"], edited_df["Northing (m)"]))
@@ -223,6 +329,8 @@ with tab1:
             "WCB_deg": [90.0, 0.0, 270.0, 180.0]
         })
         df_legs = st.data_editor(default_legs, num_rows="dynamic", use_container_width=True)
+        tab1_summary.append(f"Starting Coordinates: E0 = {start_e:.3f} m, N0 = {start_n:.3f} m")
+        tab1_tables.append(("Input Leg Bearings & Distances (Mode B)", df_legs))
         
     else:  # Mode C
         st.subheader("1. Enter Baseline Bearing, Interior Angles & Distances")
@@ -237,6 +345,8 @@ with tab1:
             "Interior_Angle (deg)": [90.0, 90.0, 90.0, 90.0]
         })
         df_angles = st.data_editor(default_angles, num_rows="dynamic", use_container_width=True)
+        tab1_summary.append(f"Start: E0 = {start_e:.3f} m, N0 = {start_n:.3f} m | Initial Bearing: {init_wcb:.4f} deg")
+        tab1_tables.append(("Input Angles & Distances (Mode C)", df_angles))
         
         # Propagate bearings from angles
         legs = []
@@ -270,6 +380,14 @@ with tab1:
         # Calculate Parcel Area
         area_sqm = calculate_shoelace_area(adjusted_coords)
         area_ha = area_sqm / 10000.0
+
+        tab1_summary.extend([
+            f"Linear Misclosure (e): {lin_mis:.4f} m | Relative Precision: 1:{int(rel_prec):,}",
+            f"dE Misclosure: {mis_e:+.4f} m | dN Misclosure: {mis_n:+.4f} m",
+            f"Zambian Legal Standards Evaluation: {prec_cls}",
+            f"Adjusted Parcel Area: {area_sqm:,.3f} m^2 ({area_ha:,.4f} ha)"
+        ])
+        tab1_tables.append(("Bowditch Adjusted Traverse Table", res_df))
         
         st.markdown("---")
         st.subheader("3. Adjusted Parcel Area & Interactive Map")
@@ -293,11 +411,17 @@ with tab1:
             
         components.html(m._repr_html_(), height=400)
 
+    report_sections.append({
+        "title": "1. Traverse Computation & Bowditch Adjustment",
+        "summary": tab1_summary,
+        "tables": tab1_tables
+    })
+
 # ==========================================
 # TAB 2: SHOELACE AREA ENGINE
 # ==========================================
 with tab2:
-    st.header("📐 Polygon Area Engine (Gauss Shoelace Formula)")
+    st.header("Polygon Area Engine (Gauss Shoelace Formula)")
     st.write("Compute the rectilinear area of any parcel directly from coordinate pairs.")
     
     area_df = st.data_editor(
@@ -310,6 +434,9 @@ with tab2:
         use_container_width=True,
         key="shoelace_editor"
     )
+
+    tab2_summary = []
+    tab2_tables = [("Shoelace Parcel Coordinates", area_df)]
     
     sh_coords = list(zip(area_df["Easting (m)"], area_df["Northing (m)"]))
     if len(sh_coords) >= 3:
@@ -319,12 +446,19 @@ with tab2:
         res1, res2 = st.columns(2)
         res1.metric("Calculated Area (m²)", f"{calc_area_sqm:,.2f} m²")
         res2.metric("Calculated Area (Hectares)", f"{calc_area_ha:,.4f} ha")
+        tab2_summary.append(f"Calculated Area: {calc_area_sqm:,.2f} m^2 ({calc_area_ha:,.4f} ha)")
+
+    report_sections.append({
+        "title": "2. Shoelace Area Engine",
+        "summary": tab2_summary,
+        "tables": tab2_tables
+    })
 
 # ==========================================
 # TAB 3: 2D HELMERT TRANSFORMATION
 # ==========================================
 with tab3:
-    st.header("🔀 2D Helmert 4-Parameter Coordinate Transformation")
+    st.header("2D Helmert 4-Parameter Coordinate Transformation")
     st.write("Transform local or baseline survey coordinates into National Grid / WGS84 coordinates.")
     
     st.subheader("1. Enter Common Control Points (Minimum 2 Points)")
@@ -353,6 +487,19 @@ with tab3:
         num_rows="dynamic",
         use_container_width=True
     )
+
+    control_pts_df = pd.DataFrame({
+        "Control Point": ["CP1", "CP2"],
+        "Source E (m)": [src_e1, src_e2],
+        "Source N (m)": [src_n1, src_n2],
+        "Target E (m)": [tgt_e1, tgt_e2],
+        "Target N (m)": [tgt_n1, tgt_n2]
+    })
+    tab3_summary = []
+    tab3_tables = [
+        ("Common Control Points", control_pts_df),
+        ("Source Points to Transform", src_pts_df)
+    ]
     
     pts_to_tx = list(zip(src_pts_df["Source Easting (m)"], src_pts_df["Source Northing (m)"]))
     params, tx_results = helmert_2d_transformation((src_e1, src_n1), (tgt_e1, tgt_n1), (src_e2, src_n2), (tgt_e2, tgt_n2), pts_to_tx)
@@ -374,4 +521,29 @@ with tab3:
                 "Transformed Easting (m)": tx_e,
                 "Transformed Northing (m)": tx_n
             })
-        st.dataframe(pd.DataFrame(out_records), use_container_width=True)
+        tx_out_df = pd.DataFrame(out_records)
+        st.dataframe(tx_out_df, use_container_width=True)
+
+        tab3_summary.append(
+            f"Scale Factor: {params['scale']:.6f} | Rotation: {params['rotation_deg']:.4f} deg | "
+            f"Shifts (cE, cN): {params['cE']:,.2f} m, {params['cN']:,.2f} m"
+        )
+        tab3_tables.append(("Transformed Coordinates", tx_out_df))
+
+    report_sections.append({
+        "title": "3. 2D Helmert Transformation",
+        "summary": tab3_summary,
+        "tables": tab3_tables
+    })
+
+# --- PDF REPORT EXPORT ---
+st.markdown("---")
+st.subheader("Export Full PDF Report")
+st.write("Generate a PDF report containing all computation tables and summary results across the tabs.")
+pdf_bytes = generate_full_pdf_report(report_sections)
+st.download_button(
+    label="Download Full Survey Report (PDF)",
+    data=pdf_bytes,
+    file_name="Zambian_Cadastral_Survey_Report.pdf",
+    mime="application/pdf"
+)
